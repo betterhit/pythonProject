@@ -1,0 +1,165 @@
+# -*- coding: utf-8 -*-
+"""
+@author: Infaraway
+@time: 2018/4/16 10:47
+@Function:
+"""
+import os
+
+from sklearn.metrics import f1_score, roc_auc_score
+from sklearn.tree import DecisionTreeClassifier
+import numpy as np
+import pandas as pd
+
+class TrAdaboost:
+    def __init__(self, base_classifier=DecisionTreeClassifier(), N=10):
+        self.base_classifier = base_classifier
+        self.N = N
+        self.beta_all = np.zeros([1, self.N])
+        self.classifiers = []
+
+    def fit(self, x_source, x_target, y_source, y_target):
+        x_train = np.concatenate((x_source, x_target), axis=0)
+        y_train = np.concatenate((y_source, y_target), axis=0)
+        x_train = np.asarray(x_train, order='C')
+        y_train = np.asarray(y_train, order='C')
+        y_source = np.asarray(y_source, order='C')
+        y_target = np.asarray(y_target, order='C')
+
+        row_source = x_source.shape[0]
+        row_target = x_target.shape[0]
+
+        # 初始化权重
+        weight_source = np.ones([row_source, 1]) / row_source
+        weight_target = np.ones([row_target, 1]) / row_target
+        weights = np.concatenate((weight_source, weight_target), axis=0)
+
+        beta = 1 / (1 + np.sqrt(2 * np.log(row_source / self.N)))
+
+        result = np.ones([row_source + row_target, self.N])
+        for i in range(self.N):
+            weights = self._calculate_weight(weights)
+            self.base_classifier.fit(x_train, y_train, sample_weight=weights[:, 0])
+            self.classifiers.append(self.base_classifier)
+
+            result[:, i] = self.base_classifier.predict(x_train)
+            error_rate = self._calculate_error_rate(y_target,
+                                                    result[row_source:, i],
+                                                    weights[row_source:, :])
+
+            print("Error Rate in target data: ", error_rate, 'round:', i, 'all_round:', self.N)
+
+            if error_rate > 0.5:
+                error_rate = 0.5
+            if error_rate == 0:
+                self.N = i
+                print("Early stopping...")
+                break
+            self.beta_all[0, i] = error_rate / (1 - error_rate)
+
+            # 调整 target 样本权重 正确样本权重变大
+            for t in range(row_target):
+                weights[row_source + t] = weights[row_source + t] * np.power(self.beta_all[0, i], -np.abs(result[row_source + t, i] - y_target[t]))
+            # 调整 source 样本 错分样本变大
+            for s in range(row_source):
+                weights[s] = weights[s] * np.power(beta, np.abs(result[s, i] - y_source[s]))
+
+    def predict(self, x_test):
+        result = np.ones([x_test.shape[0], self.N + 1])
+        predict = []
+
+        i = 0
+        for classifier in self.classifiers:
+            y_pred = classifier.predict(x_test)
+            result[:, i] = y_pred
+            i += 1
+
+        for i in range(x_test.shape[0]):
+            left = np.sum(result[i, int(np.ceil(self.N / 2)): self.N] *
+                          np.log(1 / self.beta_all[0, int(np.ceil(self.N / 2)):self.N]))
+
+            right = 0.5 * np.sum(np.log(1 / self.beta_all[0, int(np.ceil(self.N / 2)): self.N]))
+
+            if left >= right:
+                predict.append(1)
+            else:
+                predict.append(0)
+        return predict
+
+    def predict_prob(self, x_test):
+        result = np.ones([x_test.shape[0], self.N + 1])
+        predict = []
+
+        i = 0
+        for classifier in self.classifiers:
+            y_pred = classifier.predict(x_test)
+            result[:, i] = y_pred
+            i += 1
+
+        for i in range(x_test.shape[0]):
+            left = np.sum(result[i, int(np.ceil(self.N / 2)): self.N] *
+                          np.log(1 / self.beta_all[0, int(np.ceil(self.N / 2)):self.N]))
+
+            right = 0.5 * np.sum(np.log(1 / self.beta_all[0, int(np.ceil(self.N / 2)): self.N]))
+            predict.append([left, right])
+        return predict
+
+    def _calculate_weight(self, weights):
+        sum_weight = np.sum(weights)
+        return np.asarray(weights / sum_weight, order='C')
+
+    def _calculate_error_rate(self, y_target, y_predict, weight_target):
+        sum_weight = np.sum(weight_target)
+        return np.sum(weight_target[:, 0] / sum_weight * np.abs(y_target - y_predict))
+
+if __name__ == '__main__':
+    folder_path = '../bugdata3'
+    csv_files = [f for f in os.listdir(folder_path) if f.endswith('.csv')]
+    results = []  # 用于存储每一对组合的结果，可以使用字典存储
+    result_key = []
+    for i in range(len(csv_files)):
+        for j in range(len(csv_files)):  # 遍历所有文件的组合，包括相同文件
+            str_t = csv_files[i].split('-')[0]
+            str_s = csv_files[j].split('-')[0]
+            if i != j and str_s != str_t:  # 排除同一个文件的组合
+                df1 = pd.read_csv(os.path.join(folder_path, csv_files[i]))
+                df2 = pd.read_csv(os.path.join(folder_path, csv_files[j]))
+                print(csv_files[i])
+                print(csv_files[j])
+                Xs = df2.iloc[:, 1:20].values
+                Ys = df2.iloc[:, 21].values
+                Ys[Ys != 0] = 1
+
+                Xt = df1.iloc[:, 1:20].values
+                Yt = df1.iloc[:, 21].values
+
+                Yt[Yt != 0] = 1
+
+                Xs = np.array(Xs)
+                Ys = np.array(Ys)
+                Xt = np.array(Xt)
+                Yt = np.array(Yt)
+
+                tradaboost_model = TrAdaboost(base_classifier=DecisionTreeClassifier(), N=10)
+
+                # 训练模型
+                tradaboost_model.fit(Xs, Xt, Ys, Yt)
+
+                # 在目标域上进行预测
+                target_predictions = tradaboost_model.predict(Xt)
+                f1 = f1_score(Yt, target_predictions, average='weighted')
+                auc = roc_auc_score(Yt, target_predictions, average='weighted')
+                result = [csv_files[i], csv_files[j], f1]
+                results.append(result)
+
+    # 打印所有结果
+    for result in results:
+        print(result)
+    with open('adm_f1_new.txt', 'w') as f:
+        for i in results:
+            for j in i:
+                f.write(str(j))
+
+                f.write(' ')
+            f.write('\n')
+        f.close()
